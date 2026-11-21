@@ -28,11 +28,18 @@ def initialize():
             )
         """)
 
+        # 为已有数据库补列，旧采样保留，缺失的温湿度用 NULL 表示。
+        columns = {row[1] for row in db.execute("PRAGMA table_info(readings)")}
+        for name in ("temperature_c", "humidity_pct"):
+            if name not in columns:
+                db.execute(f"ALTER TABLE readings ADD COLUMN {name} REAL")
 
-def readings(device, since):
+
+def readings(device, since, include_environment=False):
+    columns = "sampled, ppm, temperature_c, humidity_pct" if include_environment else "sampled, ppm"
     with closing(connect()) as db:
         return db.execute(
-            "SELECT sampled, ppm FROM readings WHERE device=? AND sampled>=? ORDER BY sampled",
+            f"SELECT {columns} FROM readings WHERE device=? AND sampled>=? ORDER BY sampled",
             (device, since),
         ).fetchall()
 
@@ -56,20 +63,33 @@ class Handler(BaseHTTPRequestHandler):
             if not 0 < size <= 4096:
                 raise ValueError
             payload = json.loads(self.rfile.read(size))
+            if not isinstance(payload, dict):
+                raise ValueError
             device = payload["device_id"]
             sampled = payload["sampled_at"]
             ppm = payload["co2_ppm"]
+            temperature = payload.get("temperature_c")
+            humidity = payload.get("humidity_pct")
+            # 字段可缺省，兼容只上传 CO₂ 的旧固件。
+            for value, lower, upper in ((temperature, -45, 130), (humidity, 0, 100)):
+                if value is not None and (
+                    type(value) not in (float, int) or not math.isfinite(value)
+                    or not lower <= value <= upper
+                ):
+                    raise ValueError
             if (not DEVICE.fullmatch(device) or type(sampled) is not int
                     or not 946684800 <= sampled <= now + 5
-                    or type(ppm) not in (float, int) or not 0 < ppm <= 40000):
+                    or type(ppm) not in (float, int) or not math.isfinite(ppm) or not 0 < ppm <= 40000):
                 raise ValueError
         except (ValueError, KeyError, TypeError):
             return self.send_data(400, {"error": "Invalid reading"})
         # 同一设备在同一秒的采样只保存一次，重试可安全重复提交。
         with closing(connect()) as db, db:
             inserted = db.execute(
-                "INSERT OR IGNORE INTO readings VALUES (?, ?, ?, ?)",
-                (device, sampled, now, ppm),
+                """INSERT OR IGNORE INTO readings
+                   (device, sampled, received, ppm, temperature_c, humidity_pct)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (device, sampled, now, ppm, temperature, humidity),
             ).rowcount
         self.send_data(201 if inserted else 200, {"inserted": bool(inserted)})
 
@@ -83,7 +103,9 @@ class Handler(BaseHTTPRequestHandler):
         if not DEVICE.fullmatch(device):
             return self.send_data(400, {"error": "Invalid device ID"})
         now = int(time.time())
-        rows = readings(device, now - 3600)
+        measurements = readings(device, now - 3600, include_environment=True)
+        # 保留原有 rows 接口，训练程序和现有调用者仍读取时间与 CO₂ 两列。
+        rows = [row[:2] for row in measurements]
         # 用采样时间判断新鲜度，避免延迟上传的旧数据被当成实时读数。
         stale = not rows or now - rows[-1][0] > 30
         forecast = None
@@ -99,7 +121,11 @@ class Handler(BaseHTTPRequestHandler):
                 ppm = max(0, current + model["intercept"] + model["slope"] * change)
                 if math.isfinite(ppm):
                     forecast = {"ppm": round(ppm, 1), "at": (now // 60 + 10) * 60}
-        self.send_data(200, {"rows": rows, "stale": stale, "forecast": forecast})
+        self.send_data(200, {"rows": rows, "stale": stale, "forecast": forecast,
+                                  "environment": [
+                                      {"sampled_at": row[0], "temperature_c": row[2],
+                                       "humidity_pct": row[3]} for row in measurements
+                                  ]})
 
 
 def main():

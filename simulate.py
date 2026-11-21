@@ -10,7 +10,9 @@ def send(base, timestamp):
     # 用两条正弦波合成演示读数，并走与 ESP32 相同的上传接口。
     minute = timestamp / 60
     ppm = 925 + 285 * math.sin(minute / 19) + 30 * math.sin(minute / 4)
-    payload = {"device_id": "demo", "sampled_at": timestamp, "co2_ppm": round(ppm, 1)}
+    payload = {"device_id": "demo", "sampled_at": timestamp, "co2_ppm": round(ppm, 1),
+               "temperature_c": round(24 + 2 * math.sin(minute / 60), 2),
+               "humidity_pct": round(55 + 8 * math.sin(minute / 45), 2)}
     request = Request(base.rstrip("/") + "/readings", json.dumps(payload).encode(),
                       {"Content-Type": "application/json"})
     with urlopen(request, timeout=5) as response:

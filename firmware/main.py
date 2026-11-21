@@ -90,11 +90,17 @@ def main():
             # 先查询是否有新数据，再读取 CO₂、温度和湿度字。
             ready, = read_words(bus, b"\xe4\xb8", 1)
             if ready & 0x07FF:
-                ppm, _, _ = read_words(bus, b"\xec\x05", 3)
+                ppm, raw_temperature, raw_humidity = read_words(bus, b"\xec\x05", 3)
                 if ppm:
-                    print("CO2 ppm:", ppm)
+                    # 按 SCD4x 数据格式转换摄氏温度与相对湿度。
+                    temperature = -45 + 175 * raw_temperature / 65535
+                    humidity = 100 * raw_humidity / 65535
+                    print("CO2 ppm:", ppm, "Temperature C:", round(temperature, 1),
+                          "Humidity %:", round(humidity, 1))
                     upload({"device_id": DEVICE_ID, "sampled_at": time.time() + EPOCH_OFFSET,
-                            "co2_ppm": ppm})
+                            "co2_ppm": ppm,
+                            "temperature_c": round(temperature, 2),
+                            "humidity_pct": round(humidity, 2)})
         except (OSError, ValueError) as error:
             print("Sample failed:", error)
         time.sleep(10)

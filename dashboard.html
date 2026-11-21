@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>教室 CO₂ 监测</title>
+<title>教室环境监测</title>
 <style>
 * { box-sizing: border-box }
 body { margin: 0; background: #eef4f2; color: #153831; font: 16px system-ui,sans-serif }
@@ -19,26 +19,32 @@ canvas { display: block; width: 100%; height: 260px }
 #alert { color: #8e411a }
 </style>
 <main>
-<h1>教室 CO₂ 监测</h1>
+<h1>教室环境监测</h1>
 <div class="controls">
 <label>设备编号<input id="device" value="demo" maxlength="48"></label>
-<label>演示阈值（ppm）<input id="threshold" type="number" value="1000" min="1"></label>
+<label>CO₂阈值（ppm）<input id="threshold" type="number" value="1000" min="1"></label>
 </div>
 <p id="status" role="status">正在读取设备数据</p>
 <div class="cards">
 <div class="card">最新读数<strong id="current">—</strong></div>
-<div class="card">预测浓度<strong id="prediction">—</strong><small id="target"></small></div>
+<div class="card">温度<strong id="temperature">—</strong></div>
+<div class="card">相对湿度<strong id="humidity">—</strong></div>
+<div class="card">预测CO₂浓度<strong id="prediction">—</strong><small id="target"></small></div>
 </div>
 <p id="alert" role="status"></p>
 <section aria-labelledby="history"><h2 id="history">最近一小时 · 实测浓度</h2>
 <canvas id="chart" aria-label="最近一小时 CO₂ 曲线"></canvas></section>
+<section><h2>最近一小时 · 温度（°C）</h2>
+<canvas id="temperature-chart" aria-label="最近一小时温度曲线"></canvas></section>
+<section><h2>最近一小时 · 相对湿度（%）</h2>
+<canvas id="humidity-chart" aria-label="最近一小时相对湿度曲线"></canvas></section>
 </main>
 <script>
 const byId = id => document.getElementById(id);
 const timeLabel = timestamp => new Date(timestamp * 1000).toLocaleTimeString();
 let requestNumber = 0;
-function chart(rows) {
-  const canvas = byId('chart');
+function chart(rows, canvasId = 'chart', step = 100) {
+  const canvas = byId(canvasId);
   const ratio = window.devicePixelRatio || 1;
   const width = canvas.clientWidth, height = canvas.clientHeight;
   canvas.width = width * ratio;
@@ -47,9 +53,9 @@ function chart(rows) {
   ctx.scale(ratio, ratio);
   const end = Math.floor(Date.now() / 1000);
   const start = end - 3600;
-  const values = rows.map(row => row[1]);
-  const low = rows.length ? Math.floor(Math.min(...values) / 100) * 100 : 0;
-  const high = rows.length ? Math.max(low + 100, Math.ceil(Math.max(...values) / 100) * 100) : 100;
+  const values = rows.map(row => row[1]).filter(Number.isFinite);
+  const low = values.length ? Math.floor(Math.min(...values) / step) * step : 0;
+  const high = values.length ? Math.max(low + step, Math.ceil(Math.max(...values) / step) * step) : 100;
   for (let i = 0; i <= 4; i++) {
     const y = 15 + i * (height - 45) / 4;
     ctx.fillStyle = '#526760';
@@ -66,6 +72,10 @@ function chart(rows) {
   ctx.beginPath();
   let previous = null;
   for (const [timestamp, ppm] of rows) {
+    if (!Number.isFinite(ppm)) {
+      previous = null;
+      continue;
+    }
     const x = 44 + Math.min(1, (timestamp - start) / 3600) * (width - 54);
     const y = 15 + (high - ppm) / (high - low) * (height - 45);
     // 遇到超过 75 秒的间隔就断开曲线，保留掉线产生的缺口。
@@ -86,26 +96,35 @@ async function refresh() {
   try {
     const response = await fetch('/readings?device_id=' + encodeURIComponent(device));
     if (!response.ok) throw Error('读取失败');
-    const {rows, stale, forecast} = await response.json();
+    const {rows, stale, forecast, environment = []} = await response.json();
     if (ticket !== requestNumber) return;
     const latest = rows[rows.length - 1];
     const source = device === 'demo' ? '模拟数据' : '设备上传';
     byId('status').textContent = !latest ? source + ' · 无读数' :
       source + (stale ? ' · 数据已过期' : ' · 数据更新中') + ' · ' + timeLabel(latest[0]);
     byId('current').textContent = latest ? latest[1] + ' ppm' : '—';
+    const latestEnvironment = environment[environment.length - 1];
+    byId('temperature').textContent = Number.isFinite(latestEnvironment?.temperature_c)
+      ? latestEnvironment.temperature_c.toFixed(1) + ' °C' : '—';
+    byId('humidity').textContent = Number.isFinite(latestEnvironment?.humidity_pct)
+      ? latestEnvironment.humidity_pct.toFixed(1) + ' %' : '—';
     byId('prediction').textContent = forecast ? forecast.ppm + ' ppm' : '暂不可用';
     byId('target').textContent = forecast ? '预测时刻 ' + timeLabel(forecast.at) : '';
     const threshold = byId('threshold').valueAsNumber;
     const alerts = [];
-    if (!stale && latest[1] >= threshold) alerts.push('当前读数达到演示阈值');
-    if (forecast && forecast.ppm >= threshold) alerts.push('预测读数达到演示阈值');
+    if (!stale && latest[1] >= threshold) alerts.push('当前CO₂浓度达到1000ppm，CO₂浓度过高');
+    if (forecast && forecast.ppm >= threshold) alerts.push('预测读CO₂浓度达到1000ppm，CO₂浓度过高，建议通风透气');
     byId('alert').textContent = alerts.join(' · ');
     chart(rows);
+    chart(environment.map(row => [row.sampled_at, row.temperature_c]), 'temperature-chart', 1);
+    chart(environment.map(row => [row.sampled_at, row.humidity_pct]), 'humidity-chart', 5);
   } catch {
     if (ticket !== requestNumber) return;
     byId('status').textContent = '无法读取数据，请检查设备编号和服务器';
-    for (const id of ['current','prediction','target','alert']) byId(id).textContent = '—';
+    for (const id of ['current','temperature','humidity','prediction','target','alert']) byId(id).textContent = '—';
     chart([]);
+    chart([], 'temperature-chart', 1);
+    chart([], 'humidity-chart', 5);
   }
 }
 for (const id of ['device','threshold']) byId(id).addEventListener('change', refresh);
